@@ -1,0 +1,738 @@
+#pragma config JTAGEN = OFF     
+#pragma config FWDTEN = OFF
+#pragma config FNOSC =	FRCPLL
+#pragma config FSOSCEN =	OFF
+#pragma config POSCMOD =	EC
+#pragma config OSCIOFNC =	ON
+#pragma config FPBDIV =     DIV_1
+#pragma config FPLLIDIV =	DIV_2
+#pragma config FPLLMUL =	MUL_20
+#pragma config FPLLODIV =	DIV_1
+#include <xc.h>  
+#include <sys/attribs.h>
+#include <string.h>
+#include <stdlib.h>
+
+int player_R_new_position(int last_press);
+int player_L_new_position(int last_switch);
+int check_switch();
+void show_frame();
+void cheater();
+void bottom_line(void);
+void set_courser(unsigned char num);
+void top_line(void);
+void __attribute__((interrupt(IPL2AUTO), vector(_TIMER_4_VECTOR))) Timer4SR(void);
+void show_HP();
+//void __ISR(_TIMER_4_VECTOR, ipl2) Timer4SR(void); 
+void def();
+void busy(void);    //wait until done exacuting commands
+void write(char* s, int len);
+void set_courser(unsigned char num);
+void sound(void);
+int check_press();
+int check_press_in_y( int a);
+void delay_ms(unsigned int ms);
+void run_frame();
+void check_interactions(int player_L_stance,int player_L_offset,int player_R_stance,int player_R_offset);
+void show_frame();
+void start_again();
+void End_game();
+
+void ADC_Init();
+unsigned int ADC_AnalogRead(unsigned char analogPIN);
+
+void create_ball(char player,int player_offset);
+void check_ball();
+unsigned int map_to_hex_range(int func_output);
+void ShowCredits();
+
+char  game_char_info[64]={0x04,0x14,0x0e,0x05,0x04,0x04,0x0e,0x0a,//?    // pose 1 - 0
+                        0x00,0x00,0x06,0x06,0x00,0x00,0x00,0x00, // energy ball - 1
+                        0x04,0x04,0x0f,0x14,0x0c,0x04,0x0a,0x12, //punch L - 2
+                        0x05,0x05,0x07,0x05,0x05,0x04,0x0a,0x12,    //defend L - 3
+                        0x08,0x08,0x0e,0x09,0x0e,0x08,0x14,0x14,    //Hadouken attack L - 4
+                        0x04,0x04,0x1e,0x05,0x06,0x04,0x0a,0x09, //punch R - 5
+                        0x14,0x14,0x1c,0x14,0x14,0x04,0x0a,0x09,    //defend R - 6
+                        0x02,0x02,0x0e,0x12,0x0e,0x02,0x05,0x05};   //Hadouken attack R - 7
+char game_char[8]={0,1,2,3,4,5,6,7};// ???
+char control[7]={0x38,0x38,0x38,0xe,0x6,0x1,0x40}; //initializing commands- given
+int last_press;
+int temp_press;
+int last_switch;
+
+int game_over = 0;
+int L_health = 4;
+int player_L_stance = 4;
+int player_L_offset = 4;
+int L_ball_active = 0;
+int L_ball_offset = -1;
+
+int R_health = 4;
+int player_R_stance = 0;
+int player_R_offset = 12;
+int R_ball_active = 0;
+int R_ball_offset = -1;
+int exit_count = 20;
+
+unsigned int cheat_code[13] = {7,-1,7,-1,6,-1,1,-1,6,-1,1,-1,0};
+int cheater_counter = 0;
+
+ void main(){ 
+    int j,i;
+    def();  //all definitions
+    ADC_Init(); //init analog wheels
+    
+    // given from 1st assignment:
+    for (i = 0; i < sizeof(control); i++) {
+        PORTE = control[i];
+        PORTDbits.RD4 = 1; // RD4= ENABLE
+        PORTDbits.RD4 = 0;
+        busy();
+    }
+
+    // Write custom characters to CGRAM
+    PORTBbits.RB15 = 1; // RS = 1
+    for (i = 0; i < sizeof(game_char_info); i++) {
+        PORTE = game_char_info[i];
+        PORTDbits.RD4 = 1;
+        PORTDbits.RD4 = 0;
+        busy();
+    }
+
+    // Reset to DDRAM
+    PORTBbits.RB15 = 0; // RS = 0 
+    PORTE = 0x80;       // DDRAM address 0x00
+    PORTDbits.RD4 = 1;
+    PORTDbits.RD4 = 0;
+    busy();
+    
+    while(!game_over){}
+}
+
+
+//What hppens when there's an Interrupt:
+void __attribute__((interrupt(IPL2AUTO), vector(_TIMER_4_VECTOR))) Timer4SR(void) {
+    //PORTA++;
+    //write(game_char,1);
+    run_frame();
+    IFS0bits.T4IF = 0;  // Clear the Timer 4 interrupt flag
+}
+//invalid interrupt:
+//void __ISR(_TIMER_4_VECTOR, ipl2) Timer4SR(void) {             
+//    //PORTA ++;
+//    run_frame();
+//    IFS0bits.T4IF = 0;
+//}
+
+int temp_timer = 1024;
+int CheaterCounter = 0;
+//Main Frame Renderers and printers:
+void run_frame(){
+    temp_timer = ADC_AnalogRead(2);//IN analog RB2 - round resistor
+    PR4 = map_to_hex_range(temp_timer);
+    
+    //Checking if Game ended:
+    if(!exit_count){
+        start_again();
+        return;
+    }
+    if(L_health == 0 ||R_health == 0){
+        exit_count--;
+        End_game();
+        return;
+    }
+    
+    //Adjust 1st player's Stance when pressed:
+    last_press = check_press();
+    player_R_stance = player_R_new_position(last_press);
+    
+    //Adjust 2nd player's Stance when pressed:
+    last_switch = check_switch();
+    player_L_stance = player_L_new_position(last_switch);
+    
+    //Checking for Cheaters:
+    if(last_switch == cheat_code[cheater_counter]){
+        cheater();
+    }
+    
+    //Checking ball's offset:
+    check_ball();
+    
+    //Acting when there's an interaction between players:
+    check_interactions(player_L_stance,player_L_offset,player_R_stance,player_R_offset);
+    
+    //Renderer:
+    show_frame();
+}
+void show_frame(){
+    
+    //activating the LED lights:
+    show_HP();
+    
+    //2nd row's reset (because of the players)
+    for(int i = 15; i>= 0 ;i--){
+        set_courser(0xc0 + i);
+        write(" ", 1);
+    }
+    
+    //defining explosion when two haduken collide:
+    if(R_ball_offset == L_ball_offset || R_ball_offset == L_ball_offset - 1){
+        set_courser(0xc0 + R_ball_offset);
+        write("*", 1);
+        L_ball_offset = -1;
+        R_ball_offset = 20;
+        //L_ball_active = 0;
+        //R_ball_active = 0;
+    }else{
+        if(L_ball_active){
+            set_courser(0xc0 + L_ball_offset);
+            write(game_char+1, 1);
+        }
+        if(R_ball_active){
+            set_courser(0xc0 + R_ball_offset);
+            write(game_char+1, 1);
+        }       
+    }
+    //writing L player:
+    set_courser(0xc0 + player_L_offset);
+    write(game_char+player_L_stance, 1);
+    
+    //writing R player:
+    set_courser(0xc0 + player_R_offset);
+    write(game_char+player_R_stance, 1);
+    
+    //taking curser off-screen:
+    set_courser(0xd0);
+}
+
+void check_interactions(int player_L_stance,int player_L_offset,
+                        int player_R_stance,int player_R_offset){
+    
+    //checks if both players are near each other:
+    if(player_L_offset == player_R_offset - 1){
+        if(player_L_stance == 2 && player_R_stance == 5){//attack attack
+            L_health -= 1;
+            R_health -= 1;
+            sound();
+        }else if(player_L_stance == 3 && player_R_stance == 5){//defend attack
+            sound();
+        }else if(player_L_stance == 2 && player_R_stance == 6){//attack defend
+            sound();
+        }else if(player_L_stance == 3 && player_R_stance == 6){//defend defend/idle defend/defend idle/idle idle
+            //nothing happend
+        }else if(player_L_stance == 2 && (player_R_stance == 0 || player_R_stance == 7)){//attack idle / player haduken 
+            R_health -= 1;
+            //sound();
+        }else if((player_L_stance == 0 || player_L_stance == 4) && player_R_stance == 5){//idle attack / haduken player
+            L_health -= 1;
+            //sound();
+        }
+    }
+    
+    //when a player interact with the ball:
+    if(player_L_offset == R_ball_offset && R_ball_active){//L_player VS Ball
+        R_ball_active = 0;
+        if(player_L_stance != 3){ //if player doesn't defend himself
+            R_ball_offset = 20;
+            L_health -= 1;
+        }
+    }
+    if(player_R_offset == L_ball_offset && L_ball_active){//R_player VS Ball
+        L_ball_active = 0;
+        if(player_R_stance != 6){ //if player doesn't defend himself
+            L_ball_offset = -1;
+            R_health -= 1;
+        }
+    }
+    
+    //collison of balls: (see show_frame(), for other ball-ball code)
+    if((R_ball_offset == L_ball_offset || R_ball_offset == L_ball_offset - 1)&& L_ball_active && R_ball_active) {//Ball VS Ball
+        L_ball_active = 0;
+        R_ball_active = 0;
+    }
+}
+
+
+//Game Flow: 
+void End_game(){
+    
+    //writes 'game over' and who won:
+    if(L_health == 0){
+        set_courser(0x00);
+        write("   GAME OVER  ", 14);
+        
+        set_courser(0xc0 + 0x02);
+        write("player 2 win", 12);
+    }else if(R_health == 0){
+        set_courser(0x00);
+        write("   GAME OVER  ", 14);
+        
+        set_courser(0xC0 + 0x02);
+        write("player 1 win", 12);
+    }
+}      
+void start_again(){
+    
+    if(last_press == 0x41){ //NO
+        game_over = 1;
+        set_courser(0x00);
+        write("   GOODBYE", 10);
+        return;
+    }
+    
+    set_courser(0x00);
+    write("   New Game?", 12);
+    set_courser(0xc0);
+    write(" 0-NO     1-YES", 15);
+    last_press = 0;
+    
+    while(!last_press){
+        temp_press = check_press();
+        if(temp_press == 0x41 || temp_press == 0x44 ){
+            sound();
+            last_press = temp_press;
+        }
+    }
+    if(last_press == 0x41){ //NO
+        game_over = 1;
+        set_courser(0x00);
+        write("   goodbye", 10);
+        return;
+    }else if(last_press == 0x44){   //YES
+        exit_count = 20;
+        last_press = 0;
+        last_switch = -1;
+        L_health = 4;
+        R_health = 4;
+        player_L_stance = 4;
+        player_L_offset = 4;
+        player_R_stance = 0;
+        player_R_offset = 12;
+        cheater_counter = 0;
+        //2nd row's reset (because of the players)
+        set_courser(0x00);
+        for(int i = 0; i<=15 ;i++){
+            //set_courser(0x00 + i);
+            write(" ", 1);
+        }
+        set_courser(0xcf);
+    }
+}
+
+
+//In-Game tests:
+void check_ball(){
+    
+    //if ball active-> move it
+    if(R_ball_active){
+        R_ball_offset--;
+        if(L_ball_offset <= 0){
+            R_ball_active = 0;
+        }
+    }    
+    if(L_ball_active){
+        L_ball_offset++;
+        if(L_ball_offset >= 16){
+            L_ball_active = 0;
+        }
+
+    }
+}
+int check_switch(){
+    //check and return which switch is up
+    if(PORTFbits.RF3){// RF3 (SW0) configured as input
+        return 0;
+    }else if(PORTFbits.RF5){ // RF5 (SW1) configured as input
+        return 1;
+    }else if(PORTFbits.RF4){// RF4 (SW2) configured as input
+        return 2;
+    }else if(PORTDbits.RD15){// RD15 (SW3) configured as input
+        return 3;
+    }else if(PORTDbits.RD14){// RD14 (SW4) configured as input
+        return 4;
+    }else if(PORTBbits.RB11){// RB11 (SW5) configured as input
+        return 5;
+    }else if(PORTBbits.RB10){// RB10 (SW6) configured as input
+        return 6;
+    }else if(PORTBbits.RB9){// RB10 (SW7) configured as input
+        return 7;    
+    }else
+        return -1;
+}
+int check_press(){
+    int xy = 0;
+    PORTCbits.RC2=1;
+    PORTCbits.RC1=1;
+    PORTCbits.RC4=1;
+    PORTGbits.RG6=1;
+    //i=1;
+    PORTCbits.RC2=0;
+    xy=check_press_in_y(1);
+    if (xy!=0xff)
+        return xy;
+    PORTCbits.RC2=1;
+    //i=2;
+    PORTCbits.RC1=0;
+    xy=check_press_in_y(2);
+    if (xy!=0xff)
+        return xy;
+    PORTCbits.RC1=1;
+    //i=3;
+    PORTCbits.RC4=0;
+    xy=check_press_in_y(3);
+    if (xy!=0xff)
+        return xy;
+    PORTCbits.RC4=1;
+    //i=4;
+    PORTGbits.RG6=0;
+    xy=check_press_in_y(4);
+    if (xy!=0xff)
+        return xy;
+    PORTGbits.RG6=1;
+    return 0;
+}
+int check_press_in_y( int a){
+    int j=1,flag=0;
+    if(!PORTCbits.RC3)
+    { flag=1;
+        j=1;
+    }else if (!PORTGbits.RG7)
+   { flag=1;
+        j=2;
+   }else if(!PORTGbits.RG8){
+       flag=1;
+       j=3;
+    }else if(!PORTGbits.RG9){
+        flag=1;
+        j=4;
+    }
+    if(flag==0)
+        return(0xff);
+    else
+       return(j|(a<<4));
+}
+
+
+//Handling In-Game Objects:
+int player_R_new_position(int last_press){//fill
+    //return the apropriate stance to the button pressed
+    switch (last_press) {
+        case 0x11://left    //D
+            player_R_offset--;
+            player_R_offset = player_R_offset>player_L_offset? player_R_offset:player_L_offset+1;
+            return 0;
+            break;
+        case 0x14://right    //A
+            player_R_offset++;
+            player_R_offset = player_R_offset<16? player_R_offset:15;
+            return 0;
+            break;
+        case 0x21://defend  //E
+            return 6;
+            break;
+        case 0x24://Hadouken //3
+            create_ball('R',player_R_offset);
+            return 7;
+            break;
+         case 0x12://punch //C
+            return 5;
+            break;
+        default://idol
+            return 0;
+            break;
+        }
+}
+int player_L_new_position(int last_switch){//fill
+    //return the apropriate stance to the button pressed
+    switch (last_switch) {
+        case 6://left
+            player_L_offset--;
+            player_L_offset = player_L_offset>=0? player_L_offset:0;
+            return 0;
+            break;
+        case 1://right
+            player_L_offset++;
+            player_L_offset = player_L_offset<player_R_offset? player_L_offset:player_R_offset-1;
+            return 0;
+            break;
+        case 5://defend
+            return 3;
+            break;
+        case 0://Hadouken 
+            create_ball('L',player_L_offset);
+            return 4;
+            break;
+         case 2://punch
+            return 2;
+            break;
+        default://idol
+            return 0;
+            break;
+        }
+}
+void create_ball(char player,int player_offset){
+    if(player == 'R' && !R_ball_active){
+        R_ball_active = 1;
+        R_ball_offset = player_offset - 1;
+    }else if(player == 'L' && !L_ball_active){
+        L_ball_active = 1;
+        L_ball_offset = player_offset + 1;
+    }
+}
+
+//Game's Functions:
+void show_HP(){ //in leds
+    int L_HP = 0;
+    int R_HP = 0;
+    switch (L_health) {
+        case 4:
+            L_HP = 0xf0;    
+            break;
+        case 3:
+            L_HP = 0xe0;    
+            break;
+        case 2:
+            L_HP = 0xc0;    
+            break;
+        case 1:
+            L_HP = 0x80;    
+            break;
+        case 0:
+            L_HP = 0x00;    
+            break;
+    }
+    switch (R_health) {
+        case 4:
+            R_HP = 0x0f;
+            break;
+        case 3:
+            R_HP = 0x07;            
+            break;
+        case 2:
+            R_HP = 0x03;
+            break;
+        case 1:
+            R_HP = 0x01;
+            break;
+        case 0:
+            R_HP = 0x00;
+            break;
+    }
+    LATA = L_HP | R_HP;
+}
+// Game's Speed- Function to map values between ranges
+unsigned int map_to_hex_range(int func_output) {
+    // Define the input and output ranges
+    int input_min = 0;
+    int input_max = 1023;
+    unsigned int output_min = 0x7777;
+    unsigned int output_max = 0xFFFF;
+
+    // Apply the mapping formula
+    unsigned int mapped_value = output_min + 
+        (unsigned int)((func_output - input_min) * (double)(output_max - output_min) / (input_max - input_min));
+    
+    return mapped_value;
+}
+//Cheats:
+void cheater(){
+    while(last_switch == cheat_code[cheater_counter]){
+        cheater_counter++;
+        set_courser(0x00);
+        write("in cheat", 8);
+        while (last_switch == check_switch()); 
+        last_switch = check_switch();
+    }
+    if(cheater_counter==13){
+        ShowCredits();
+    }else{
+        cheater_counter = 0;
+    }
+}
+void ShowCredits(){
+    
+    set_courser(0x00);
+    write("Shave 100, Lo?", 14);
+    delay_ms(10000);
+    start_again();
+}
+
+
+// Working with the LCD:
+void write(char* s, int len){
+    PORTBbits.RB15 = 1; // rs=0 get data
+    PORTDbits.RD5 = 0;  // w=0  print data
+    for (int i = 0; i < len; i++) {
+        PORTE = s[i];
+        PORTDbits.RD4 = 1;  // update new position
+        PORTDbits.RD4 = 0;  // update start only after set to 1 and then 0
+        busy();
+    }
+}
+void bottom_line(void){
+    set_courser(0xC0); // Command to set DDRAM address to 0x40 (start of second line)
+}
+void set_courser(unsigned char num){
+    PORTBbits.RB15 = 0;  // Set RS = 0 for instruction mode
+    PORTE = num;        // Command to set DDRAM address to 0x40 (start of second line)
+    PORTDbits.RD4 = 1;  // update new position
+    PORTDbits.RD4 = 0;  // update start only after set to 1 and then 0
+    busy();
+}
+void top_line(void){
+    set_courser(0x00); // Command to set DDRAM address to 0x40 (start of second line)
+}
+
+
+//Helper Functions:
+//Analog Handling Functions:
+ void ADC_Init(){
+    AD1CON1	=0; 
+    AD1CON1bits.SSRC = 7;   // Internal counter ends sampling and starts conversion (auto convert)
+    AD1CON1bits.FORM = 0;   // Integer 16-bit
+	// Setup for manual sampling
+    AD1CSSL	=0;
+    AD1CON3	=0x0002;     // ADC Conversion Clock Select bits: TAD = 6 TPB
+    AD1CON2	=0;
+    AD1CON2bits.VCFG = 0;   // Voltage Reference Configuration bits: VREFH = AVDD and VREFL = AVSS
+	// Turn on ADC
+    AD1CON1bits.ON = 1;
+} 
+unsigned int ADC_AnalogRead(unsigned char analogPIN){
+    /* ************************************************************************** */
+/***	ADC_AnalogRead
+**
+**	Parameters:
+**		unsigned char analogPIN - the number of the analog pin that must be read
+**
+**	Return Value:
+**		- the 16 LSB bits contain the result of analog to digital conversion of the analog value of the specified pin
+**
+**	Description:
+**		This function returns the digital value corresponding to the analog pin, 
+**      as the result of analog to digital conversion performed by the ADC module. 
+**          
+*/
+    int adc_val = 0;
+    IEC0bits.T2IE = 0;
+    AD1CHS = analogPIN << 16;       // AD1CHS<16:19> controls which analog pin goes to the ADC
+ 
+    AD1CON1bits.SAMP = 1;           // Begin sampling
+    while( AD1CON1bits.SAMP );      // wait until acquisition is done
+    while( ! AD1CON1bits.DONE );    // wait until conversion is done
+ 
+    adc_val = ADC1BUF0;
+    IEC0bits.T2IE = 1;
+    return adc_val;
+}
+
+//given
+void busy(void){
+    char RD,RS;
+    int STATUS_TRISE;
+    int portMap;
+    RD=PORTDbits.RD5;
+    RS=PORTBbits.RB15;
+    STATUS_TRISE=TRISE;
+	PORTDbits.RD5 = 1;//w/r
+	PORTBbits.RB15 = 0;//rs 
+    portMap = TRISE;
+	portMap |= 0x80;
+	TRISE = portMap;
+    do{
+        PORTDbits.RD4=1;//enable=1
+        PORTDbits.RD4=0;//enable=0
+    }while(PORTEbits.RE7); // BF ?????
+        PORTDbits.RD5=RD; 
+        PORTBbits.RB15=RS;
+        TRISE=STATUS_TRISE;   
+}
+
+//In-Game's Sound:
+void sound(void) {
+    for(int i=1;i<15;i++){
+        PORTBbits.RB14 = 1;  // Set RA0 high (sound ON)
+        delay_ms(abs(25-i));       // Wait for 500ms (adjust frequency here)
+        PORTBbits.RB14 = 0;  // Set RA0 low (sound OFF)
+        delay_ms(1);
+    }
+}
+
+//Delaying Interrupts:
+void delay_ms(unsigned int ms) {
+    unsigned int i, j;
+    for (i = 0; i < ms; i++) {
+        for (j = 0; j < 800; j++) {
+            __asm("nop"); // No operation (adjust based on clock speed)
+        }
+    }
+}
+
+//Project's Definitions:
+void def(){
+    srand(42);
+    TRISA &= 0xff00;
+    PR4 = 0xffff;                        //set period register, generates one interrupt every 1 ms
+    TMR4 = 0;                           //initialize count to 0
+    IPTMR=0;//INTERRUPT PROXIMITY TIMER REGISTER
+    TRISE&=0xff00;
+    LATA = 0;
+    T4CONbits.TCKPS0 = 1;                //1:256 prescale value
+    T4CONbits.TCKPS1 = 1; 
+    T4CONbits.TCKPS2 = 1; 
+    T4CONbits.TGATE = 0;                //not gated input (the default)
+    T4CONbits.TCS = 0;                  //PCBLK input (the default)
+    T4CONbits.ON = 1;                   //turn on Timer1
+    IPC4bits.T4IP = 2;                  //priority
+    IPC4bits.T4IS = 0;                  //subpriority
+    IFS0bits.T4IF = 0;                  //clear interrupt flag
+    IEC0bits.T4IE = 1;
+    INTCONbits.MVEC=1;//vector interrupt
+
+    asm("ei");//on interrupt    //allow all interapts, must to be last
+    TRISCbits.TRISC2=0;//RC2
+    TRISCbits.TRISC1=0;//RC1
+    TRISCbits.TRISC4=0;//RC4            
+    TRISGbits.TRISG6=0;//RG6
+    ANSELGbits.ANSG6=0;//???????
+    TRISCbits.TRISC3 =1;//RC3
+    CNPUCbits.CNPUC3;               
+    TRISGbits.TRISG7=1;//RG7
+    ANSELGbits.ANSG7=0;
+    CNPUGbits.CNPUG7;                  
+    TRISGbits.TRISG8=1;//RG8
+    ANSELGbits.ANSG8=0;//???????
+    CNPUGbits.CNPUG8;//???
+    TRISGbits.TRISG9=1;//RG9
+    ANSELGbits.ANSG9=0;//???????
+    CNPUGbits.CNPUG9;//????? 
+    TRISBbits.TRISB15 = 0; // RB15 (DISP_RS) set as an output
+    ANSELBbits.ANSB15 = 0; // disable analog functionality on RB15 (DISP_RS)
+    TRISDbits.TRISD5 = 0; // RD5 (DISP_RW) set as an output
+    TRISDbits.TRISD4 = 0; // RD4 (DISP_EN) set as an output
+    //TRISEbits.TRISE0 = 1; // RE0 (DB0) set as input (change 1 to 0 for
+    ANSELEbits.ANSE2 = 0;
+    ANSELEbits.ANSE4 = 0;
+    ANSELEbits.ANSE5 = 0;
+    ANSELEbits.ANSE6 = 0;
+    PORTBbits.RB15=0;//rs=0
+    PORTDbits.RD5=0;//w=0
+    ANSELEbits.ANSE7 = 0;
+    TRISFbits.TRISF3 = 1; // RF3 (SW0) configured as input
+    TRISFbits.TRISF5 = 1; // RF5 (SW1) configured as input
+    TRISFbits.TRISF4 = 1; // RF4 (SW2) configured as input
+    TRISDbits.TRISD15 = 1; // RD15 (SW3) configured as input
+    TRISDbits.TRISD14 = 1; // RD14 (SW4) configured as input
+    TRISBbits.TRISB11 = 1; // RB11 (SW5) configured as input
+    ANSELBbits.ANSB11 = 0; // RB11 (SW5) disabled analog
+    TRISBbits.TRISB10 = 1; // RB10 (SW6) configured as input
+    ANSELBbits.ANSB10 = 0; // RB10 (SW6) disabled analog
+    TRISBbits.TRISB9 = 1; // RB9 (SW7) configured as input
+    ANSELBbits.ANSB9 = 0; // RB9 (SW7) disabled analog
+    TRISBbits.TRISB14 = 0;
+    ANSELBbits.ANSB14 = 0;
+    TRISBbits.TRISB2 = 1;
+    ANSELBbits.ANSB2 = 1;
+    TRISBbits.TRISB4 = 1;
+    ANSELBbits.ANSB4 = 1;
+}
